@@ -204,7 +204,7 @@ class RECAP(nn.Module):
         
 
 
-    def forward(self, complete_input, incomplete_input, labels, mode="completion"):
+    def forward(self, complete_input, incomplete_input, labels=None, mode="completion"):
 
         vision, audio, language = complete_input
         vision_m, audio_m, language_m = incomplete_input  # (bs, input_len, input_dim)
@@ -291,11 +291,16 @@ class RECAP(nn.Module):
             # Compute the prediction output for each modality: (batch, 3, 8, 1)
             preds = torch.stack([self.modal_predictors[i](feats[:, i, :, :]) for i in range(3)], dim=1)  # (batch, 3, 8, 1)
 
-            # # Estimate mutual information (MI) using MSE as a proxy: (batch, 3, 8)
-            mi_scores = -F.mse_loss(preds.squeeze(-1), labels.unsqueeze(1).repeat(1, 3, 8), reduction='none')
-
-            # # Average across the 8 tokens to obtain modality-level MI estimates: (batch, 3)
-            mi_scores = mi_scores.mean(dim=-1)
+            # During training, the regression target supervises the modality
+            # ranking loss.  Attachments 3 and 4 are unlabeled, so inference
+            # must not require a target that is unavailable at submission time.
+            mi_scores = None
+            if labels is not None:
+                mi_scores = -F.mse_loss(
+                    preds.squeeze(-1),
+                    labels.unsqueeze(1).repeat(1, 3, 8),
+                    reduction='none',
+                ).mean(dim=-1)
 
             qkvs = self.attn_proj(feats)  # (batch, 3, 8, 3 * hidden_size) (64,3,8,128)
             q, v, k = qkvs.chunk(3, dim=-1)  # (batch, 3, 8, hidden_size)
@@ -315,7 +320,11 @@ class RECAP(nn.Module):
             pred_final = self.final_pred_fc(feat_final)  # (batch, 1)
             polarity_logits = self.polarity_pred_fc(feat_final)  # (batch, 3)
             
-            ranking_loss = self.compute_ranking_loss(attn_weights, mi_scores)
+            ranking_loss = (
+                self.compute_ranking_loss(attn_weights, mi_scores)
+                if mi_scores is not None
+                else pred_final.new_zeros(())
+            )
 
             output = pred_final
 
@@ -325,6 +334,8 @@ class RECAP(nn.Module):
                     'polarity_logits': polarity_logits,
                     'attention_weights': attn_weights,
                     'modality_mi_scores': mi_scores,
+                    'modal_predictions': preds.squeeze(-1),
+                    'fused_feature': feat_final,
                     'ranking_loss': ranking_loss}
 
     def compute_ranking_loss(self, attn_weights, mi_scores, margin=0.1):
