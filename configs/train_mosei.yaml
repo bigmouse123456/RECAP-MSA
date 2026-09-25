@@ -8,7 +8,15 @@ base:
   adv: 0.01
   recon: 0.1 
   task: 1.0
+  task_reg: 1.0
+  task_cls: 1.0
+  task_modal: 0.2
   para_rank: 0.01
+  bert_lr: 0.00001
+  head_dropout: 0.2
+  early_stopping_patience: 25
+  selection_corr_weight: 0.25
+  selection_mae_weight: 0.25
   paraSSL_LV: 0.001
   paraSSL_LA: 0.001
   paraSSL_VA: 0.001

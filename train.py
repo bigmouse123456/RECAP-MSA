@@ -39,6 +39,46 @@ def resolve_stage1_checkpoint(ckpt_root):
     raise ValueError("Please provide --stage1_ckpt or --time for stage 2 training.")
 
 
+def compute_class_weights(train_loader):
+    labels = torch.as_tensor(train_loader.dataset.labels['C']).view(-1).long()
+    counts = torch.bincount(labels, minlength=3).float()
+    if (counts == 0).any():
+        raise ValueError(f"All three polarity classes are required; counts={counts.tolist()}")
+    weights = labels.numel() / (3.0 * counts)
+    print(f"Polarity class counts: {counts.int().tolist()}")
+    print(f"Polarity class weights: {weights.tolist()}")
+    return weights.to(device)
+
+
+def build_stage2_optimizer(model, args):
+    bert_lr = args['base'].get('bert_lr', args['base']['lr'] * 0.1)
+    bert_parameters = [p for p in model.bertmodel.parameters() if p.requires_grad]
+    bert_parameter_ids = {id(p) for p in bert_parameters}
+    other_parameters = [
+        p for p in model.parameters()
+        if p.requires_grad and id(p) not in bert_parameter_ids
+    ]
+    print(f"Stage 2 learning rates: BERT={bert_lr}, other={args['base']['lr']}")
+    return torch.optim.AdamW(
+        [
+            {'params': bert_parameters, 'lr': bert_lr},
+            {'params': other_parameters, 'lr': args['base']['lr']},
+        ],
+        weight_decay=args['base']['weight_decay'],
+    )
+
+
+def validation_selection_score(results, args):
+    """One validation-only score balancing both competition tasks."""
+    corr_weight = args['base'].get('selection_corr_weight', 0.25)
+    mae_weight = args['base'].get('selection_mae_weight', 0.25)
+    return (
+        results['Polarity_Macro_F1']
+        + corr_weight * results['Corr']
+        - mae_weight * results['MAE']
+    )
+
+
 def main():
     best_valid_results, best_test_results = {}, {}
     loss_history = {}
@@ -70,7 +110,13 @@ def main():
 
 
     loss_fn_stage1 = MultimodalLoss_stage1(args)
-    loss_fn_stage2 = MultimodalLoss_stage2(args)
+    if stage == 'fusion_prediction':
+        class_weights = compute_class_weights(dataLoader['train'])
+    else:
+        class_weights = None
+    loss_fn_stage2 = MultimodalLoss_stage2(
+        args, class_weights=class_weights
+    ).to(device)
 
     metrics = MetricsTop(train_mode = args['base']['train_mode']).getMetics(args['dataset']['datasetName'])
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -113,17 +159,25 @@ def main():
         for p in model.generator.parameters():
             p.requires_grad = False
 
-        optimizer = torch.optim.AdamW(model.parameters(),
-                            lr=args['base']['lr'],
-                            weight_decay=args['base']['weight_decay'])
+        optimizer = build_stage2_optimizer(model, args)
     
         # Recreate the learning rate scheduler
         scheduler_warmup = get_scheduler(optimizer, args)
         best_valid_f1 = float('-inf')
+        best_valid_mae = float('inf')
+        best_valid_joint = float('-inf')
         best_valid_epoch = None
-        best_model_path = os.path.join(
+        best_classification_path = os.path.join(
             ckpt_root, f'best_valid_polarity_f1_seed{seed}.pth'
         )
+        best_regression_path = os.path.join(
+            ckpt_root, f'best_valid_mae_seed{seed}.pth'
+        )
+        best_joint_path = os.path.join(
+            ckpt_root, f'best_valid_joint_seed{seed}.pth'
+        )
+        epochs_without_improvement = 0
+        early_stopping_patience = args['base'].get('early_stopping_patience', 25)
 
         for epoch in range(1, args['base']['n_epochs_stage2']+1):
             train_loss_dict = train(model, dataLoader['train'], optimizer, loss_fn_stage1, loss_fn_stage2, epoch, metrics, mode=stage) 
@@ -136,28 +190,53 @@ def main():
             if args['base']['do_validation']:
                 valid_results = evaluate(model, dataLoader['valid'], loss_fn_stage2, epoch, metrics)
                 current_valid_f1 = valid_results['Polarity_Macro_F1']
+                current_valid_mae = valid_results['MAE']
+                current_valid_joint = validation_selection_score(valid_results, args)
                 print(f'Valid Results Epoch {epoch}: {valid_results}')
+                print(f'Validation Joint Score Epoch {epoch}: {current_valid_joint:.4f}')
 
-                # Select one checkpoint using validation data only.  The test
-                # split is evaluated only when validation improves, so test
-                # labels never decide which model is saved.
                 if current_valid_f1 > best_valid_f1:
                     best_valid_f1 = current_valid_f1
+                    save_model(best_classification_path, epoch, model, optimizer)
+                    print(f'New best classification checkpoint: {best_classification_path}')
+
+                if current_valid_mae < best_valid_mae:
+                    best_valid_mae = current_valid_mae
+                    save_model(best_regression_path, epoch, model, optimizer)
+                    print(f'New best regression checkpoint: {best_regression_path}')
+
+                if current_valid_joint > best_valid_joint:
+                    best_valid_joint = current_valid_joint
                     best_valid_epoch = epoch
                     best_valid_results = dict(valid_results)
-                    save_model(best_model_path, epoch, model, optimizer)
-                    best_test_results = evaluate(
-                        model, dataLoader['test'], loss_fn_stage2, epoch, metrics
-                    )
-                    print(f'New best validation checkpoint: {best_model_path}')
-                    print(f'Test Results at Selected Epoch {epoch}: {best_test_results}')
+                    save_model(best_joint_path, epoch, model, optimizer)
+                    epochs_without_improvement = 0
+                    print(f'New best joint checkpoint: {best_joint_path}')
+                else:
+                    epochs_without_improvement += 1
 
                 print(
                     f'Best Valid Epoch: {best_valid_epoch}; '
                     f'Best Valid Results: {best_valid_results}\n'
                 )
 
+                if epochs_without_improvement >= early_stopping_patience:
+                    print(
+                        f'Early stopping after {early_stopping_patience} epochs '
+                        'without joint-score improvement.'
+                    )
+                    break
+
             scheduler_warmup.step()
+
+        if best_valid_epoch is not None:
+            checkpoint = torch.load(best_joint_path, map_location=device)
+            model.load_state_dict(checkpoint['state_dict'])
+            best_test_results = evaluate(
+                model, dataLoader['test'], loss_fn_stage2, best_valid_epoch, metrics
+            )
+            print(f'Final Selected Checkpoint: {best_joint_path}')
+            print(f'Test Results at Selected Epoch {best_valid_epoch}: {best_test_results}')
 
 
 def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch, metrics, mode='completion'):
@@ -191,7 +270,6 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
                 for key, value in loss_stage1.items():
                     # loss_dict[key] += value.item()
                     loss_dict[key] += value.item() if isinstance(value, torch.Tensor) else value
-            loss_dict = {key: value / (cur_iter+1) for key, value in loss_dict.items()}
 
         else:
             out = model(complete_input, incomplete_input, sentiment_labels, mode='fusion_prediction')
@@ -219,7 +297,9 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
                 torch.cat(polarity_logits), torch.cat(polarity_true)
             ))
 
-            loss_dict = {key: value / (cur_iter+1) for key, value in loss_dict.items()}
+
+    num_batches = cur_iter + 1 if 'cur_iter' in locals() else 1
+    loss_dict = {key: value / num_batches for key, value in loss_dict.items()}
 
     print(f'Train Loss Epoch {epoch}: {loss_dict}')
     print(f'Train Results Epoch {epoch}: {results}')

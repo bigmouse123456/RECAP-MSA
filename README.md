@@ -71,6 +71,22 @@ If you prefer, you can also pass the stage 1 checkpoint suffix through `--time`,
 
 You can also obtain the validation and test results directly from the stage 2 training logs, and set `--missing_rate_eval_test` to evaluate under different missing rates.
 
+For the joint polarity-classification and intensity-regression task, stage 2
+automatically computes inverse-frequency class weights from the training split.
+It uses `bert_lr` for BERT and `lr` for the remaining modules, and saves three
+validation-selected checkpoints:
+
+- `best_valid_polarity_f1_seed<seed>.pth` (classification)
+- `best_valid_mae_seed<seed>.pth` (regression)
+- `best_valid_joint_seed<seed>.pth` (joint score, used for the final test report)
+
+The joint validation score is
+`Macro-F1 + selection_corr_weight * Corr - selection_mae_weight * MAE`.
+The test split is evaluated once after training with the selected joint
+checkpoint. The relevant optional `base` configuration keys are `bert_lr`,
+`task_modal`, `head_dropout`, `early_stopping_patience`,
+`selection_corr_weight`, and `selection_mae_weight`.
+
 
 
 

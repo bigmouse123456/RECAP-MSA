@@ -17,6 +17,7 @@ class RECAP(nn.Module):
         self.token_len = args['model']['feature_extractor']['token_length'][0]  # 8
         self.hidden_dim = args['model']['feature_extractor']['hidden_dims'][0]  # 128
         self.adversarial_loss_fn = nn.BCELoss()
+        self.prediction_dropout = nn.Dropout(args['base'].get('head_dropout', 0.2))
         self.final_pred_fc = nn.Linear(args['model']['fusion']['final_predictor']['hidden_dim'], 1)  # stage 2
         self.polarity_pred_fc = nn.Linear(
             args['model']['fusion']['final_predictor']['hidden_dim'], 3
@@ -317,8 +318,9 @@ class RECAP(nn.Module):
 
             # feat_final = feat_final.mean(dim=1)
             # feat_final = torch.mean(v_mean, dim=1)
-            pred_final = self.final_pred_fc(feat_final)  # (batch, 1)
-            polarity_logits = self.polarity_pred_fc(feat_final)  # (batch, 3)
+            prediction_feature = self.prediction_dropout(feat_final)
+            pred_final = self.final_pred_fc(prediction_feature)  # (batch, 1)
+            polarity_logits = self.polarity_pred_fc(prediction_feature)  # (batch, 3)
             
             ranking_loss = (
                 self.compute_ranking_loss(attn_weights, mi_scores)
@@ -349,20 +351,34 @@ class RECAP(nn.Module):
         Returns:
             ranking_loss: (float) ranking loss
         """
-        batch_size, num_modalities = attn_weights.shape
-        loss = 0.0
+        _, num_modalities = attn_weights.shape
+        losses = []
 
         for i in range(num_modalities):
-            for j in range(num_modalities):
-                if i == j:
-                    continue  # Skip self-comparison
+            for j in range(i + 1, num_modalities):
+                score_difference = mi_scores[:, i] - mi_scores[:, j]
+                non_ties = score_difference.abs() > 1e-8
+                if not non_ties.any():
+                    continue
 
-                indicator = (mi_scores[:, i] > mi_scores[:, j]).float()  # 1 if mi_i > mi_j, else 0
-                loss += F.margin_ranking_loss(
-                    attn_weights[:, i], attn_weights[:, j], indicator, margin=margin, reduction='mean'
+                # margin_ranking_loss requires targets in {-1, +1}; zero is
+                # not a valid "second modality is better" target.
+                ranking_target = torch.where(
+                    score_difference[non_ties] > 0,
+                    torch.ones_like(score_difference[non_ties]),
+                    -torch.ones_like(score_difference[non_ties]),
                 )
+                losses.append(F.margin_ranking_loss(
+                    attn_weights[non_ties, i],
+                    attn_weights[non_ties, j],
+                    ranking_target,
+                    margin=margin,
+                    reduction='mean',
+                ))
 
-        return loss / max(1, num_modalities * (num_modalities - 1))  # Normalize
+        if not losses:
+            return attn_weights.new_zeros(())
+        return torch.stack(losses).mean()
 
 
 class Generator(nn.Module):
