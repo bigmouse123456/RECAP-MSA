@@ -114,7 +114,54 @@ stopping. These settings reduce the train-validation gap without retraining
 Stage 1. Use `--eval_checkpoint <path>` to evaluate a saved checkpoint without
 training it again.
 
+### RobustMSA: missing-aware, interpretable competition model
 
+The two-stage RECAP pipeline above is kept unchanged.  `RobustMSA` is a
+separate, lighter single-stage model for the E-problem (CMU-MOSEI subset,
+Attachment 2 `unaligned_50.pkl`) that targets the train/validation gap:
+
+- **Same missing definition everywhere.** A position is *missing* when its
+  feature row is all zero (the Attachment 3 definition).  Missing positions get
+  a learned embedding and are excluded from evidence pooling.
+- **Attachment-3-style augmentation.** Training zeros random *contiguous*
+  spans (10-60 % of the valid length, up to 3 spans) and occasionally a whole
+  modality; the old pipeline instead dropped 50 % of random tokens.
+- **Train-set feature standardization** over observed rows (COVAREP/Facet
+  scales differ by orders of magnitude); `nan`/`inf` are zeroed.
+- **Small model, no unsupervised stage.** Per-modality 2-layer Transformers
+  (hidden 128, audio/vision pooled from 500 to 100 steps), a reliability-aware
+  modality gate, and regression + polarity heads with unimodal auxiliary heads.
+- **Validation matches both special tests.** Every epoch is scored on the
+  complete valid split (Attachment 4) and on a fixed seeded contiguous-missing
+  copy (Attachment 3); selection uses the mean of Macro-F1 + Corr - MAE.
+- **Polarity decision on validation.** After training, class log-biases or
+  intensity thresholds are chosen by validation Macro-F1 and stored in the
+  checkpoint.  The test split is evaluated once, afterwards.
+
+```bash
+# train a few seeds (config: configs/robust_mosei.yaml)
+for s in 1111 2222 3333; do python train_robust.py --seed $s; done
+
+# ensemble metrics, ensemble polarity rule, missing-pattern analysis
+# (modality set x begin/middle/end/random x 10-100 % duration) for Problem 2
+python analyze_robust.py --checkpoints "ckpt/robust_mosei/robust_robust_v1_seed*.pth"
+
+# Attachment 3 / 4 predictions with explanations
+python predict_robust.py --checkpoints "ckpt/robust_mosei/robust_robust_v1_seed*.pth" \
+  --decision_json outputs/ensemble_decision.json \
+  --input_dir <attachment3_dir> --output_csv outputs/attachment3_predictions.csv
+```
+
+The prediction CSV contains polarity, intensity, class probabilities, the main
+modality, per-modality contribution weights, unimodal intensities, observed
+ratios and the top-k key evidence positions per modality (text word pieces;
+audio/vision frame ranges with their relative position in the clip, which maps
+to the video time as `relative position x clip duration`).
+
+`text_source: precomputed` uses the 50x768 `text` field, so text missing spans
+in Attachment 3 are detected exactly like audio/vision.  `text_source: bert`
+fine-tunes the top 4 BERT layers from `text_bert` instead; it needs
+`text_bert` in the special-test files as well.
 
 
 
