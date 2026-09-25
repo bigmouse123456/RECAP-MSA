@@ -114,6 +114,7 @@ def predict_one(model, tokenizer, path, max_text_length, device):
     probabilities = torch.softmax(output["polarity_logits"], dim=-1)[0]
     class_id = int(probabilities.argmax().item())
     modality_weights = output["attention_weights"][0]
+    modality_predictions = output["modal_predictions"][0].mean(dim=-1)
 
     row = {
         "sample_id": path.stem,
@@ -128,6 +129,13 @@ def predict_one(model, tokenizer, path, max_text_length, device):
         "text_weight": float(modality_weights[0].item()),
         "audio_weight": float(modality_weights[1].item()),
         "vision_weight": float(modality_weights[2].item()),
+        "text_intensity": float(modality_predictions[0].item()),
+        "audio_intensity": float(modality_predictions[1].item()),
+        "vision_intensity": float(modality_predictions[2].item()),
+        "modality_ensemble": float(
+            output["modality_ensemble"].reshape(-1)[0].item()
+        ),
+        "fusion_gate": float(output["regression_gate"].reshape(-1)[0].item()),
         "main_modality": MODALITY_NAMES[int(modality_weights.argmax().item())],
         "audio_zero_row_rate": zero_row_rate(audio),
         "vision_zero_row_rate": zero_row_rate(vision),

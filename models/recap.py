@@ -133,6 +133,20 @@ class RECAP(nn.Module):
 
         self.attn_proj = nn.Linear(args['model']['fusion']['atten_projection']['hidden_dim'], 3 * args['model']['fusion']['atten_projection']['hidden_dim'])
 
+        # A single attention-weighted average discards complementary modality
+        # information.  Preserve all three pooled modalities and refine them
+        # through a regression-specific residual fusion tower.
+        fusion_dim = self.hidden_dim * (self.num_modalities + 1)
+        self.regression_fusion = nn.Sequential(
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, self.hidden_dim * 2),
+            nn.GELU(),
+            nn.Dropout(args['base'].get('fusion_dropout', 0.2)),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+        )
+        self.regression_gate = nn.Linear(self.hidden_dim, 1)
+
 
     def compute_pairwise_ssl_loss(self, complete_feat_1, complete_feat_2, generated_feat_1, generated_feat_2):
         uncond_losses = [self.infonce_x1x2(self.linears_infonce_x1x2[0](complete_feat_1), self.linears_infonce_x1x2[1](complete_feat_2)),
@@ -301,7 +315,7 @@ class RECAP(nn.Module):
                     preds.squeeze(-1),
                     labels.unsqueeze(1).repeat(1, 3, 8),
                     reduction='none',
-                ).mean(dim=-1)
+                ).mean(dim=-1).detach()
 
             qkvs = self.attn_proj(feats)  # (batch, 3, 8, 3 * hidden_size) (64,3,8,128)
             q, v, k = qkvs.chunk(3, dim=-1)  # (batch, 3, 8, hidden_size)
@@ -316,11 +330,31 @@ class RECAP(nn.Module):
 
             feat_final = torch.matmul(attn_weights.unsqueeze(1), v_mean).squeeze(1)
 
-            # feat_final = feat_final.mean(dim=1)
-            # feat_final = torch.mean(v_mean, dim=1)
-            prediction_feature = self.prediction_dropout(feat_final)
-            pred_final = self.final_pred_fc(prediction_feature)  # (batch, 1)
-            polarity_logits = self.polarity_pred_fc(prediction_feature)  # (batch, 3)
+            # Retain the weighted summary and every modality-specific vector.
+            # The residual path keeps optimization stable on the small dataset.
+            regression_input = torch.cat(
+                [feat_final, v_mean.reshape(v_mean.size(0), -1)], dim=-1
+            )
+            regression_feature = self.regression_fusion(regression_input) + feat_final
+
+            modal_predictions = preds.squeeze(-1)
+            modal_ensemble = (
+                attn_weights * modal_predictions.mean(dim=-1)
+            ).sum(dim=-1, keepdim=True)
+
+            regression_feature = self.prediction_dropout(regression_feature)
+            fused_regression = self.final_pred_fc(regression_feature)
+            regression_gate = torch.sigmoid(self.regression_gate(regression_feature))
+            raw_prediction = (
+                regression_gate * fused_regression
+                + (1.0 - regression_gate) * modal_ensemble
+            )
+            # Competition intensities are constrained to [-3, 3].  Dividing
+            # before tanh retains an approximately linear slope near zero.
+            pred_final = 3.0 * torch.tanh(raw_prediction / 3.0)
+
+            classification_feature = self.prediction_dropout(feat_final)
+            polarity_logits = self.polarity_pred_fc(classification_feature)
             
             ranking_loss = (
                 self.compute_ranking_loss(attn_weights, mi_scores)
@@ -336,8 +370,10 @@ class RECAP(nn.Module):
                     'polarity_logits': polarity_logits,
                     'attention_weights': attn_weights,
                     'modality_mi_scores': mi_scores,
-                    'modal_predictions': preds.squeeze(-1),
-                    'fused_feature': feat_final,
+                    'modal_predictions': modal_predictions,
+                    'modality_ensemble': modal_ensemble,
+                    'regression_gate': regression_gate,
+                    'fused_feature': regression_feature,
                     'ranking_loss': ranking_loss}
 
     def compute_ranking_loss(self, attn_weights, mi_scores, margin=0.1):

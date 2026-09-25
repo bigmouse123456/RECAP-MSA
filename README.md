@@ -87,6 +87,20 @@ checkpoint. The relevant optional `base` configuration keys are `bert_lr`,
 `task_modal`, `head_dropout`, `early_stopping_patience`,
 `selection_corr_weight`, and `selection_mae_weight`.
 
+### Continuous-intensity competition adaptation
+
+The regression branch keeps each pooled modality instead of reducing the three
+modalities to one weighted average. It combines residual multimodal fusion with
+a bounded `[-3, 3]` prediction and optimizes Smooth-L1/MAE, concordance
+correlation, pairwise order, and polarity-consistency objectives. This directly
+aligns training with the competition MAE and Pearson-correlation metrics.
+
+Stage 1 checkpoints now contain BERT, all three feature projectors, and the
+completion generator. Older checkpoints contain only the generator and are
+accepted with a warning, but retraining Stage 1 is strongly recommended because
+the old checkpoint connects a trained generator to newly initialized feature
+projectors during Stage 2.
+
 
 
 

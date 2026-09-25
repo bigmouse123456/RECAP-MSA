@@ -50,7 +50,7 @@ def compute_class_weights(train_loader):
     return weights.to(device)
 
 
-def build_stage2_optimizer(model, args):
+def build_stage1_optimizer(model, args):
     bert_lr = args['base'].get('bert_lr', args['base']['lr'] * 0.1)
     bert_parameters = [p for p in model.bertmodel.parameters() if p.requires_grad]
     bert_parameter_ids = {id(p) for p in bert_parameters}
@@ -58,7 +58,6 @@ def build_stage2_optimizer(model, args):
         p for p in model.parameters()
         if p.requires_grad and id(p) not in bert_parameter_ids
     ]
-    print(f"Stage 2 learning rates: BERT={bert_lr}, other={args['base']['lr']}")
     return torch.optim.AdamW(
         [
             {'params': bert_parameters, 'lr': bert_lr},
@@ -68,10 +67,69 @@ def build_stage2_optimizer(model, args):
     )
 
 
+def build_stage2_optimizer(model, args):
+    bert_lr = args['base'].get('bert_lr', args['base']['lr'] * 0.1)
+    generator_lr = args['base'].get('generator_lr', bert_lr)
+    bert_parameters = [p for p in model.bertmodel.parameters() if p.requires_grad]
+    bert_parameter_ids = {id(p) for p in bert_parameters}
+    generator_parameters = [p for p in model.generator.parameters() if p.requires_grad]
+    generator_parameter_ids = {id(p) for p in generator_parameters}
+    other_parameters = [
+        p for p in model.parameters()
+        if p.requires_grad
+        and id(p) not in bert_parameter_ids
+        and id(p) not in generator_parameter_ids
+    ]
+    parameter_groups = [
+        {'params': bert_parameters, 'lr': bert_lr},
+        {'params': other_parameters, 'lr': args['base']['lr']},
+    ]
+    if generator_parameters:
+        parameter_groups.append({'params': generator_parameters, 'lr': generator_lr})
+    print(
+        f"Stage 2 learning rates: BERT={bert_lr}, "
+        f"generator={generator_lr}, other={args['base']['lr']}"
+    )
+    return torch.optim.AdamW(
+        parameter_groups,
+        weight_decay=args['base']['weight_decay'],
+    )
+
+
+STAGE1_MODULES = ('bertmodel', 'proj_l', 'proj_a', 'proj_v', 'generator')
+
+
+def capture_stage1_state(model):
+    return {
+        name: {
+            key: value.detach().cpu().clone()
+            for key, value in getattr(model, name).state_dict().items()
+        }
+        for name in STAGE1_MODULES
+    }
+
+
+def load_stage1_state(model, checkpoint):
+    loaded = []
+    missing = []
+    for name in STAGE1_MODULES:
+        if name in checkpoint:
+            getattr(model, name).load_state_dict(checkpoint[name])
+            loaded.append(name)
+        else:
+            missing.append(name)
+    print(f"Loaded Stage 1 modules: {loaded}")
+    if missing:
+        print(
+            "WARNING: legacy Stage 1 checkpoint is missing "
+            f"{missing}. Retrain Stage 1 for a consistent feature space."
+        )
+
+
 def validation_selection_score(results, args):
     """One validation-only score balancing both competition tasks."""
-    corr_weight = args['base'].get('selection_corr_weight', 0.25)
-    mae_weight = args['base'].get('selection_mae_weight', 0.25)
+    corr_weight = args['base'].get('selection_corr_weight', 0.5)
+    mae_weight = args['base'].get('selection_mae_weight', 0.5)
     return (
         results['Polarity_Macro_F1']
         + corr_weight * results['Corr']
@@ -124,9 +182,7 @@ def main():
     
     if opt.stage == 'completion':
         print("===> Stage 1: Completion training")
-        optimizer = torch.optim.AdamW(model.parameters(),
-                                    lr=args['base']['lr'],
-                                    weight_decay=args['base']['weight_decay'])
+        optimizer = build_stage1_optimizer(model, args)
         scheduler_warmup = get_scheduler(optimizer, args)
         best_model_state = None
         best_loss = float('inf')
@@ -141,11 +197,11 @@ def main():
             current_loss = train_loss_dict["loss"]
             if current_loss < best_loss:
                 best_loss = current_loss
-                best_model_state = {'generator': model.generator.state_dict()}
+                best_model_state = capture_stage1_state(model)
         if best_model_state is not None:
             torch.save(best_model_state, os.path.join(ckpt_root, filename))
             print(f"Best model saved with loss_total: {best_loss:.4f}")
-        print("===> Saved completion & discriminator after Stage 1")
+        print("===> Saved Stage 1 encoders and completion generator")
      
     elif opt.stage == 'fusion_prediction':
         print("===> Stage 2: Fusion training")
@@ -154,10 +210,12 @@ def main():
         stage1_ckpt = resolve_stage1_checkpoint(ckpt_root)
         checkpoint = torch.load(stage1_ckpt, map_location=device)
         print(f"Loaded stage 1 checkpoint: {stage1_ckpt}")
-        model.generator.load_state_dict(checkpoint['generator'])
+        load_stage1_state(model, checkpoint)
 
+        finetune_generator = args['base'].get('finetune_generator', True)
         for p in model.generator.parameters():
-            p.requires_grad = False
+            p.requires_grad = finetune_generator
+        print(f"Fine-tune Stage 1 generator: {finetune_generator}")
 
         optimizer = build_stage2_optimizer(model, args)
     

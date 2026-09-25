@@ -33,15 +33,58 @@ class MultimodalLoss_stage2(nn.Module):
         super().__init__()
         # fusion, prediction loss
         self.task = args['base'].get('task_reg', args['base']['task'])
-        self.task_cls = args['base'].get('task_cls', 1.0)
-        self.task_modal = args['base'].get('task_modal', 0.2)
+        self.task_cls = args['base'].get('task_cls', 0.5)
+        self.task_modal = args['base'].get('task_modal', 0.1)
+        self.task_corr = args['base'].get('task_corr', 0.3)
+        self.task_order = args['base'].get('task_order', 0.1)
+        self.task_consistency = args['base'].get('task_consistency', 0.05)
+        self.mae_mix = args['base'].get('mae_mix', 0.5)
         self.para_rank = args['base']['para_rank']
         self.regression_fn = nn.SmoothL1Loss()
         self.classification_fn = nn.CrossEntropyLoss(weight=class_weights)
 
+    @staticmethod
+    def concordance_loss(predictions, targets, eps=1e-8):
+        predictions = predictions.view(-1)
+        targets = targets.view(-1)
+        pred_mean = predictions.mean()
+        target_mean = targets.mean()
+        pred_centered = predictions - pred_mean
+        target_centered = targets - target_mean
+        covariance = (pred_centered * target_centered).mean()
+        pred_variance = pred_centered.square().mean()
+        target_variance = target_centered.square().mean()
+        ccc = (2.0 * covariance) / (
+            pred_variance
+            + target_variance
+            + (pred_mean - target_mean).square()
+            + eps
+        )
+        return 1.0 - ccc
+
+    @staticmethod
+    def pairwise_order_loss(predictions, targets, min_difference=0.05):
+        predictions = predictions.view(-1)
+        targets = targets.view(-1)
+        target_difference = targets[:, None] - targets[None, :]
+        prediction_difference = predictions[:, None] - predictions[None, :]
+        valid = torch.triu(
+            target_difference.abs(), diagonal=1
+        ) > min_difference
+        if not valid.any():
+            return predictions.new_zeros(())
+        direction = target_difference[valid].sign()
+        return F.softplus(-direction * prediction_difference[valid]).mean()
+
 
     def forward(self, out, label):
-        l_sp = self.regression_fn(out['sentiment_preds'], label['sentiment_labels'])
+        predictions = out['sentiment_preds']
+        targets = label['sentiment_labels']
+        l_huber = self.regression_fn(predictions, targets)
+        l_mae = F.l1_loss(predictions, targets)
+        l_sp = (1.0 - self.mae_mix) * l_huber + self.mae_mix * l_mae
+        l_corr = self.concordance_loss(predictions, targets)
+        l_order = self.pairwise_order_loss(predictions, targets)
         l_cls = self.classification_fn(
             out['polarity_logits'], label['classification_labels'].view(-1).long()
         )
@@ -52,17 +95,31 @@ class MultimodalLoss_stage2(nn.Module):
         )
         l_modal = self.regression_fn(out['modal_predictions'], modal_targets)
 
+        polarity_probabilities = F.softmax(out['polarity_logits'], dim=-1)
+        polarity_scale = predictions.new_tensor([-1.0, 0.0, 1.0])
+        expected_polarity = (
+            polarity_probabilities * polarity_scale.unsqueeze(0)
+        ).sum(dim=-1, keepdim=True)
+        l_consistency = F.smooth_l1_loss(expected_polarity, predictions / 3.0)
+
         loss = (
             self.task * l_sp
             + self.task_cls * l_cls
             + self.task_modal * l_modal
+            + self.task_corr * l_corr
+            + self.task_order * l_order
+            + self.task_consistency * l_consistency
             + self.para_rank * l_ranking
         )
 
         return {
             'loss': loss,
             'l_sp': l_sp,
+            'l_mae': l_mae,
+            'l_corr': l_corr,
+            'l_order': l_order,
             'l_cls': l_cls,
             'l_modal': l_modal,
+            'l_consistency': l_consistency,
             'ranking': l_ranking,
         }
