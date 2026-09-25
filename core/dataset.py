@@ -38,12 +38,21 @@ class MMDataset(Dataset):
 
         self.rawText = data[self.mode]['raw_text']
         self.ids = data[self.mode]['id']
+        regression_labels = data[self.mode][self.train_mode+'_labels'].astype(np.float32)
         self.labels = {
-            'M': data[self.mode][self.train_mode+'_labels'].astype(np.float32),  # Classification/regression labels for train/valid/test splits
+            'M': regression_labels,  # Continuous sentiment intensity.
             'missing_rate_l': np.zeros_like(data[self.mode][self.train_mode+'_labels']).astype(np.float32),
             'missing_rate_a': np.zeros_like(data[self.mode][self.train_mode+'_labels']).astype(np.float32),
             'missing_rate_v': np.zeros_like(data[self.mode][self.train_mode+'_labels']).astype(np.float32),
         }
+
+        # The competition supplies both continuous intensity labels and explicit
+        # Negative/Neutral/Positive labels.  Keep the original regression target
+        # in M and expose a normalized 0/1/2 class target in C.
+        if 'classification_labels' in data[self.mode]:
+            self.labels['C'] = self._normalize_classification_labels(
+                data[self.mode]['classification_labels'], regression_labels
+            )
 
         if self.datasetName == 'sims':
             for m in "TAV":
@@ -87,6 +96,44 @@ class MMDataset(Dataset):
 
     def __init_sims(self):
         return self.__init_mosi()
+
+    @staticmethod
+    def _normalize_classification_labels(classification_labels, regression_labels):
+        labels = np.asarray(classification_labels).reshape(-1)
+        regression = np.asarray(regression_labels).reshape(-1)
+
+        if labels.dtype.kind in {'U', 'S', 'O'}:
+            mapping = {'negative': 0, 'neutral': 1, 'positive': 2}
+            try:
+                normalized = np.asarray(
+                    [mapping[str(value).strip().lower()] for value in labels],
+                    dtype=np.int64,
+                )
+            except KeyError as exc:
+                raise ValueError(f'Unknown classification label: {exc.args[0]}') from exc
+        else:
+            numeric = labels.astype(np.int64)
+            unique = set(np.unique(numeric).tolist())
+            if unique.issubset({-1, 0, 1}):
+                normalized = numeric + 1
+            elif unique.issubset({0, 1, 2}):
+                normalized = numeric
+            else:
+                raise ValueError(
+                    'classification_labels must use {-1,0,1}, {0,1,2}, '
+                    'or Negative/Neutral/Positive strings; got '
+                    f'{sorted(unique)}'
+                )
+
+        expected = np.where(regression < 0, 0, np.where(regression > 0, 2, 1))
+        mismatch_count = int(np.count_nonzero(normalized != expected))
+        if mismatch_count:
+            raise ValueError(
+                f'{mismatch_count} classification labels disagree with the '
+                'sign of regression_labels.'
+            )
+
+        return normalized.reshape(-1, 1)
 
 
     def generate_m(self, modality, input_mask, input_len, missing_rate, missing_seed, mode='text'):
@@ -150,7 +197,13 @@ class MMDataset(Dataset):
             'vision_m': torch.Tensor(self.vision_m[index]),
             'index': index,
             'id': self.ids[index],
-            'labels': {k: torch.Tensor(v[index].reshape(-1)) for k, v in self.labels.items()}
+            'labels': {
+                k: torch.as_tensor(
+                    v[index].reshape(-1),
+                    dtype=torch.long if k == 'C' else torch.float32,
+                )
+                for k, v in self.labels.items()
+            }
         }
 
         return sample

@@ -6,9 +6,9 @@ from core.dataset import MMDataLoader
 from core.losses import MultimodalLoss_stage1
 from core.losses import MultimodalLoss_stage2
 from core.scheduler import get_scheduler
-from core.utils import setup_seed, get_best_results
+from core.utils import setup_seed, save_model
 from models.recap import build_model
-from core.metric import MetricsTop 
+from core.metric import MetricsTop, classification_metrics
 import matplotlib.pyplot as plt
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = '0'
@@ -119,7 +119,11 @@ def main():
     
         # Recreate the learning rate scheduler
         scheduler_warmup = get_scheduler(optimizer, args)
-
+        best_valid_f1 = float('-inf')
+        best_valid_epoch = None
+        best_model_path = os.path.join(
+            ckpt_root, f'best_valid_polarity_f1_seed{seed}.pth'
+        )
 
         for epoch in range(1, args['base']['n_epochs_stage2']+1):
             train_loss_dict = train(model, dataLoader['train'], optimizer, loss_fn_stage1, loss_fn_stage2, epoch, metrics, mode=stage) 
@@ -131,18 +135,34 @@ def main():
 
             if args['base']['do_validation']:
                 valid_results = evaluate(model, dataLoader['valid'], loss_fn_stage2, epoch, metrics)
-                best_valid_results = get_best_results(valid_results, best_valid_results, epoch, model, optimizer, ckpt_root, seed, save_best_model=False)
-                print(f'Current Best Valid Results: {best_valid_results}')
+                current_valid_f1 = valid_results['Polarity_Macro_F1']
+                print(f'Valid Results Epoch {epoch}: {valid_results}')
 
-            test_results = evaluate(model, dataLoader['test'], loss_fn_stage2, epoch, metrics)
-            best_test_results = get_best_results(test_results, best_test_results, epoch, model, optimizer, ckpt_root, seed, save_best_model=True)
-            print(f'Current Best Test Results: {best_test_results}\n')
+                # Select one checkpoint using validation data only.  The test
+                # split is evaluated only when validation improves, so test
+                # labels never decide which model is saved.
+                if current_valid_f1 > best_valid_f1:
+                    best_valid_f1 = current_valid_f1
+                    best_valid_epoch = epoch
+                    best_valid_results = dict(valid_results)
+                    save_model(best_model_path, epoch, model, optimizer)
+                    best_test_results = evaluate(
+                        model, dataLoader['test'], loss_fn_stage2, epoch, metrics
+                    )
+                    print(f'New best validation checkpoint: {best_model_path}')
+                    print(f'Test Results at Selected Epoch {epoch}: {best_test_results}')
+
+                print(
+                    f'Best Valid Epoch: {best_valid_epoch}; '
+                    f'Best Valid Results: {best_valid_results}\n'
+                )
 
             scheduler_warmup.step()
 
 
 def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch, metrics, mode='completion'):
     y_pred, y_true = [], []
+    polarity_logits, polarity_true = [], []
     loss_dict = {}
     results = {}
 
@@ -152,7 +172,10 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
         incomplete_input = (data['vision_m'].to(device), data['audio_m'].to(device), data['text_m'].to(device))
 
         sentiment_labels = data['labels']['M'].to(device)
+        classification_labels = data['labels'].get('C')
         label = {'sentiment_labels': sentiment_labels}
+        if classification_labels is not None:
+            label['classification_labels'] = classification_labels.to(device)
 
         if mode == 'completion':
             out = model(complete_input, incomplete_input, sentiment_labels, mode='completion')
@@ -179,6 +202,8 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
             
             y_pred.append(out['sentiment_preds'].cpu())
             y_true.append(label['sentiment_labels'].cpu())
+            polarity_logits.append(out['polarity_logits'].cpu())
+            polarity_true.append(label['classification_labels'].cpu())
 
             if cur_iter == 0:
                 for key, value in loss_stage2.items():
@@ -190,6 +215,9 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
 
             pred, true = torch.cat(y_pred), torch.cat(y_true)
             results = metrics(pred, true)
+            results.update(classification_metrics(
+                torch.cat(polarity_logits), torch.cat(polarity_true)
+            ))
 
             loss_dict = {key: value / (cur_iter+1) for key, value in loss_dict.items()}
 
@@ -202,6 +230,7 @@ def evaluate(model, eval_loader, loss_fn_stage2, epoch, metrics):
     loss_dict = {}
 
     y_pred, y_true = [], []
+    polarity_logits, polarity_true = [], []
 
     model.eval()
     
@@ -210,7 +239,11 @@ def evaluate(model, eval_loader, loss_fn_stage2, epoch, metrics):
         incomplete_input = (data['vision_m'].to(device), data['audio_m'].to(device), data['text_m'].to(device))
 
         sentiment_labels = data['labels']['M'].to(device)
-        label = {'sentiment_labels': sentiment_labels}
+        classification_labels = data['labels']['C'].to(device)
+        label = {
+            'sentiment_labels': sentiment_labels,
+            'classification_labels': classification_labels,
+        }
         
         with torch.no_grad():
             out = model(complete_input, incomplete_input, sentiment_labels, mode='fusion_prediction')
@@ -219,6 +252,8 @@ def evaluate(model, eval_loader, loss_fn_stage2, epoch, metrics):
 
         y_pred.append(out['sentiment_preds'].cpu())
         y_true.append(label['sentiment_labels'].cpu())
+        polarity_logits.append(out['polarity_logits'].cpu())
+        polarity_true.append(label['classification_labels'].cpu())
 
         if cur_iter == 0:
             for key, value in loss.items():
@@ -235,6 +270,9 @@ def evaluate(model, eval_loader, loss_fn_stage2, epoch, metrics):
     
     pred, true = torch.cat(y_pred), torch.cat(y_true)
     results = metrics(pred, true)
+    results.update(classification_metrics(
+        torch.cat(polarity_logits), torch.cat(polarity_true)
+    ))
 
     return results
 

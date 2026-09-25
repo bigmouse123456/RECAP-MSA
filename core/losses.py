@@ -32,16 +32,21 @@ class MultimodalLoss_stage2(nn.Module):
     def __init__(self, args):
         super().__init__()
         # fusion, prediction loss
-        self.task = args['base']['task'] 
+        self.task = args['base'].get('task_reg', args['base']['task'])
+        self.task_cls = args['base'].get('task_cls', 1.0)
         self.para_rank = args['base']['para_rank']
-        self.MSE_Fn = nn.MSELoss() 
+        self.regression_fn = nn.SmoothL1Loss()
+        self.classification_fn = nn.CrossEntropyLoss()
 
 
     def forward(self, out, label):
-        l_sp = self.MSE_Fn(out['sentiment_preds'], label['sentiment_labels'])
+        l_sp = self.regression_fn(out['sentiment_preds'], label['sentiment_labels'])
+        l_cls = self.classification_fn(
+            out['polarity_logits'], label['classification_labels'].view(-1).long()
+        )
 
         l_ranking = out['ranking_loss']
 
-        loss = self.task * l_sp + self.para_rank * l_ranking
+        loss = self.task * l_sp + self.task_cls * l_cls + self.para_rank * l_ranking
 
-        return {'loss': loss, 'l_sp': l_sp, 'ranking': l_ranking}
+        return {'loss': loss, 'l_sp': l_sp, 'l_cls': l_cls, 'ranking': l_ranking}

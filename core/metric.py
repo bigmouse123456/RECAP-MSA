@@ -121,3 +121,15 @@ class MetricsTop():
     
     def getMetics(self, datasetName):
         return self.metrics_dict[datasetName.upper()]
+
+
+def classification_metrics(logits, labels):
+    """Competition three-class polarity metrics."""
+    predictions = logits.argmax(dim=-1).view(-1).cpu().detach().numpy()
+    targets = labels.view(-1).cpu().detach().numpy()
+    return {
+        'Polarity_Accuracy': round(accuracy_score(targets, predictions), 4),
+        'Polarity_Macro_F1': round(
+            f1_score(targets, predictions, average='macro', zero_division=0), 4
+        ),
+    }

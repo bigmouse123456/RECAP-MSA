@@ -18,6 +18,9 @@ class RECAP(nn.Module):
         self.hidden_dim = args['model']['feature_extractor']['hidden_dims'][0]  # 128
         self.adversarial_loss_fn = nn.BCELoss()
         self.final_pred_fc = nn.Linear(args['model']['fusion']['final_predictor']['hidden_dim'], 1)  # stage 2
+        self.polarity_pred_fc = nn.Linear(
+            args['model']['fusion']['final_predictor']['hidden_dim'], 3
+        )  # Negative, Neutral, Positive
 
         self.feat_dims = [self.token_len*self.hidden_dim, self.token_len*self.hidden_dim]  # 1024, 1024
         activation = 'relu'
@@ -310,6 +313,7 @@ class RECAP(nn.Module):
             # feat_final = feat_final.mean(dim=1)
             # feat_final = torch.mean(v_mean, dim=1)
             pred_final = self.final_pred_fc(feat_final)  # (batch, 1)
+            polarity_logits = self.polarity_pred_fc(feat_final)  # (batch, 3)
             
             ranking_loss = self.compute_ranking_loss(attn_weights, mi_scores)
 
@@ -318,6 +322,9 @@ class RECAP(nn.Module):
 
             return {'sentiment_preds': output, 
                     'final_pred': pred_final,
+                    'polarity_logits': polarity_logits,
+                    'attention_weights': attn_weights,
+                    'modality_mi_scores': mi_scores,
                     'ranking_loss': ranking_loss}
 
     def compute_ranking_loss(self, attn_weights, mi_scores, margin=0.1):
