@@ -24,6 +24,7 @@ parser.add_argument('--time', type=str, default='')
 parser.add_argument('--stage1_ckpt', type=str, default='')
 parser.add_argument('--missing_rate_eval_test', type=float, default=None) 
 parser.add_argument('--batch_size', type=int, default=64) 
+parser.add_argument('--eval_checkpoint', type=str, default='')
 opt = parser.parse_args()
 print(opt)
 from datetime import datetime
@@ -70,6 +71,10 @@ def build_stage1_optimizer(model, args):
 def build_stage2_optimizer(model, args):
     bert_lr = args['base'].get('bert_lr', args['base']['lr'] * 0.1)
     generator_lr = args['base'].get('generator_lr', bert_lr)
+    stage2_lr = args['base'].get('stage2_lr', args['base']['lr'])
+    stage2_weight_decay = args['base'].get(
+        'stage2_weight_decay', args['base']['weight_decay']
+    )
     bert_parameters = [p for p in model.bertmodel.parameters() if p.requires_grad]
     bert_parameter_ids = {id(p) for p in bert_parameters}
     generator_parameters = [p for p in model.generator.parameters() if p.requires_grad]
@@ -80,19 +85,21 @@ def build_stage2_optimizer(model, args):
         and id(p) not in bert_parameter_ids
         and id(p) not in generator_parameter_ids
     ]
-    parameter_groups = [
-        {'params': bert_parameters, 'lr': bert_lr},
-        {'params': other_parameters, 'lr': args['base']['lr']},
-    ]
+    parameter_groups = []
+    if bert_parameters:
+        parameter_groups.append({'params': bert_parameters, 'lr': bert_lr})
+    if other_parameters:
+        parameter_groups.append({'params': other_parameters, 'lr': stage2_lr})
     if generator_parameters:
         parameter_groups.append({'params': generator_parameters, 'lr': generator_lr})
     print(
         f"Stage 2 learning rates: BERT={bert_lr}, "
-        f"generator={generator_lr}, other={args['base']['lr']}"
+        f"generator={generator_lr}, other={stage2_lr}; "
+        f"weight_decay={stage2_weight_decay}"
     )
     return torch.optim.AdamW(
         parameter_groups,
-        weight_decay=args['base']['weight_decay'],
+        weight_decay=stage2_weight_decay,
     )
 
 
@@ -124,6 +131,36 @@ def load_stage1_state(model, checkpoint):
             "WARNING: legacy Stage 1 checkpoint is missing "
             f"{missing}. Retrain Stage 1 for a consistent feature space."
         )
+
+
+def configure_stage2_backbone(model, args):
+    freeze_backbone = args['base'].get('freeze_stage1_backbone', True)
+    model.stage1_backbone_frozen = freeze_backbone
+    if freeze_backbone:
+        for name in STAGE1_MODULES:
+            for parameter in getattr(model, name).parameters():
+                parameter.requires_grad = False
+        print("Stage 1 backbone is frozen during Stage 2")
+        trainable = sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"Trainable parameters: {trainable:,} / {total:,}")
+        return
+
+    finetune_generator = args['base'].get('finetune_generator', True)
+    for parameter in model.generator.parameters():
+        parameter.requires_grad = finetune_generator
+    print(f"Fine-tune Stage 1 generator: {finetune_generator}")
+
+
+def keep_frozen_backbone_in_eval_mode(model):
+    if not getattr(model, 'stage1_backbone_frozen', False):
+        return
+    for name in STAGE1_MODULES:
+        getattr(model, name).eval()
 
 
 def validation_selection_score(results, args):
@@ -179,6 +216,20 @@ def main():
     metrics = MetricsTop(train_mode = args['base']['train_mode']).getMetics(args['dataset']['datasetName'])
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'stage1_modules_seed{seed}_{timestamp}.pth'
+
+    if opt.eval_checkpoint:
+        checkpoint = torch.load(opt.eval_checkpoint, map_location=device)
+        model.load_state_dict(checkpoint['state_dict'])
+        valid_results = evaluate(
+            model, dataLoader['valid'], loss_fn_stage2, checkpoint.get('epoch', 0), metrics
+        )
+        test_results = evaluate(
+            model, dataLoader['test'], loss_fn_stage2, checkpoint.get('epoch', 0), metrics
+        )
+        print(f'Evaluation Checkpoint: {opt.eval_checkpoint}')
+        print(f'Validation Results: {valid_results}')
+        print(f'Test Results: {test_results}')
+        return
     
     if opt.stage == 'completion':
         print("===> Stage 1: Completion training")
@@ -211,11 +262,7 @@ def main():
         checkpoint = torch.load(stage1_ckpt, map_location=device)
         print(f"Loaded stage 1 checkpoint: {stage1_ckpt}")
         load_stage1_state(model, checkpoint)
-
-        finetune_generator = args['base'].get('finetune_generator', True)
-        for p in model.generator.parameters():
-            p.requires_grad = finetune_generator
-        print(f"Fine-tune Stage 1 generator: {finetune_generator}")
+        configure_stage2_backbone(model, args)
 
         optimizer = build_stage2_optimizer(model, args)
     
@@ -225,7 +272,7 @@ def main():
         best_valid_mae = float('inf')
         best_valid_joint = float('-inf')
         best_valid_epoch = None
-        checkpoint_tag = args['base'].get('checkpoint_tag', 'continuous_v3')
+        checkpoint_tag = args['base'].get('checkpoint_tag', 'regularized_v4')
         checkpoint_suffix = f'_{checkpoint_tag}' if checkpoint_tag else ''
         best_classification_path = os.path.join(
             ckpt_root,
@@ -307,6 +354,7 @@ def train(model, train_loader, optimizer, loss_fn_stage1, loss_fn_stage2, epoch,
     results = {}
 
     model.train()
+    keep_frozen_backbone_in_eval_mode(model)
     for cur_iter, data in enumerate(train_loader):
         complete_input = (data['vision'].to(device), data['audio'].to(device), data['text'].to(device))
         incomplete_input = (data['vision_m'].to(device), data['audio_m'].to(device), data['text_m'].to(device))

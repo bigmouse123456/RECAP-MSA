@@ -9,20 +9,27 @@ base:
   recon: 0.1 
   task: 1.0
   task_reg: 1.0
-  task_cls: 0.5
+  task_cls: 0.4
   task_modal: 0.1
-  task_corr: 0.3
-  task_order: 0.1
+  task_corr: 0.1
+  task_order: 0.05
   task_consistency: 0.05
   mae_mix: 0.5
   para_rank: 0.01
   bert_lr: 0.00001
   generator_lr: 0.00001
-  finetune_generator: true
-  head_dropout: 0.2
-  fusion_dropout: 0.2
-  checkpoint_tag: continuous_v3
-  early_stopping_patience: 25
+  stage2_lr: 0.00005
+  stage2_weight_decay: 0.001
+  freeze_stage1_backbone: true
+  finetune_generator: false
+  recovery_mode: residual
+  completion_residual_scale: 0.25
+  modality_dropout: 0.1
+  head_dropout: 0.35
+  fusion_dropout: 0.35
+  label_smoothing: 0.05
+  checkpoint_tag: regularized_v4
+  early_stopping_patience: 12
   selection_corr_weight: 0.5
   selection_mae_weight: 0.5
   paraSSL_LV: 0.001

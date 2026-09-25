@@ -103,6 +103,17 @@ accepted with a warning, but retraining Stage 1 is strongly recommended because
 the old checkpoint connects a trained generator to newly initialized feature
 projectors during Stage 2.
 
+### Small-data regularized Stage 2
+
+For small competition datasets, set `freeze_stage1_backbone: true` to keep the
+Stage 1 BERT/projectors/generator fixed and train only the fusion and prediction
+modules. `recovery_mode: residual` preserves observed features while adding a
+scaled completion residual. Stage 2 also supports a separate learning rate and
+weight decay, modality/fusion/head dropout, label smoothing, and shorter early
+stopping. These settings reduce the train-validation gap without retraining
+Stage 1. Use `--eval_checkpoint <path>` to evaluate a saved checkpoint without
+training it again.
+
 
 
 

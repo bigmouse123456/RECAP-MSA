@@ -18,6 +18,11 @@ class RECAP(nn.Module):
         self.hidden_dim = args['model']['feature_extractor']['hidden_dims'][0]  # 128
         self.adversarial_loss_fn = nn.BCELoss()
         self.prediction_dropout = nn.Dropout(args['base'].get('head_dropout', 0.2))
+        self.modality_dropout = nn.Dropout(args['base'].get('modality_dropout', 0.1))
+        self.recovery_mode = args['base'].get('recovery_mode', 'residual')
+        self.completion_residual_scale = args['base'].get(
+            'completion_residual_scale', 0.25
+        )
         self.final_pred_fc = nn.Linear(args['model']['fusion']['final_predictor']['hidden_dim'], 1)  # stage 2
         self.polarity_pred_fc = nn.Linear(
             args['model']['fusion']['final_predictor']['hidden_dim'], 3
@@ -296,12 +301,28 @@ class RECAP(nn.Module):
         elif mode == "fusion_prediction":        
             
             # Use the trained generator for modality completion
-            generated_language = self.generator[0](h_1_l)
-            generated_audio = self.generator[1](h_1_a)
-            generated_vision = self.generator[2](h_1_v)
+            completion_language = self.generator[0](h_1_l)
+            completion_audio = self.generator[1](h_1_a)
+            completion_vision = self.generator[2](h_1_v)
+
+            if self.recovery_mode == 'generated':
+                generated_language = completion_language
+                generated_audio = completion_audio
+                generated_vision = completion_vision
+            elif self.recovery_mode == 'residual':
+                scale = self.completion_residual_scale
+                generated_language = h_1_l + scale * completion_language
+                generated_audio = h_1_a + scale * completion_audio
+                generated_vision = h_1_v + scale * completion_vision
+            else:
+                raise ValueError(
+                    f"Unknown recovery_mode={self.recovery_mode!r}; "
+                    "expected 'generated' or 'residual'."
+                )
 
 
             feats = torch.stack([generated_language, generated_audio, generated_vision], dim=1)  # (batch, 3, 8, hidden_size)
+            feats = self.modality_dropout(feats)
             
             # Compute the prediction output for each modality: (batch, 3, 8, 1)
             preds = torch.stack([self.modal_predictors[i](feats[:, i, :, :]) for i in range(3)], dim=1)  # (batch, 3, 8, 1)

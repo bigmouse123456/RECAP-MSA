@@ -33,15 +33,18 @@ class MultimodalLoss_stage2(nn.Module):
         super().__init__()
         # fusion, prediction loss
         self.task = args['base'].get('task_reg', args['base']['task'])
-        self.task_cls = args['base'].get('task_cls', 0.5)
+        self.task_cls = args['base'].get('task_cls', 0.4)
         self.task_modal = args['base'].get('task_modal', 0.1)
-        self.task_corr = args['base'].get('task_corr', 0.3)
-        self.task_order = args['base'].get('task_order', 0.1)
+        self.task_corr = args['base'].get('task_corr', 0.1)
+        self.task_order = args['base'].get('task_order', 0.05)
         self.task_consistency = args['base'].get('task_consistency', 0.05)
         self.mae_mix = args['base'].get('mae_mix', 0.5)
         self.para_rank = args['base']['para_rank']
         self.regression_fn = nn.SmoothL1Loss()
-        self.classification_fn = nn.CrossEntropyLoss(weight=class_weights)
+        self.classification_fn = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=args['base'].get('label_smoothing', 0.05),
+        )
 
     @staticmethod
     def concordance_loss(predictions, targets, eps=1e-8):
