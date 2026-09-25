@@ -86,6 +86,8 @@ The test split is evaluated once after training with the selected joint
 checkpoint. The relevant optional `base` configuration keys are `bert_lr`,
 `task_modal`, `head_dropout`, `early_stopping_patience`,
 `selection_corr_weight`, and `selection_mae_weight`.
+Set `checkpoint_tag` to keep experiments separate; the continuous adaptation
+uses `continuous_v3` by default so earlier checkpoints are not overwritten.
 
 ### Continuous-intensity competition adaptation
 

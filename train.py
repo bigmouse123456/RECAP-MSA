@@ -225,14 +225,17 @@ def main():
         best_valid_mae = float('inf')
         best_valid_joint = float('-inf')
         best_valid_epoch = None
+        checkpoint_tag = args['base'].get('checkpoint_tag', 'continuous_v3')
+        checkpoint_suffix = f'_{checkpoint_tag}' if checkpoint_tag else ''
         best_classification_path = os.path.join(
-            ckpt_root, f'best_valid_polarity_f1_seed{seed}.pth'
+            ckpt_root,
+            f'best_valid_polarity_f1_seed{seed}{checkpoint_suffix}.pth'
         )
         best_regression_path = os.path.join(
-            ckpt_root, f'best_valid_mae_seed{seed}.pth'
+            ckpt_root, f'best_valid_mae_seed{seed}{checkpoint_suffix}.pth'
         )
         best_joint_path = os.path.join(
-            ckpt_root, f'best_valid_joint_seed{seed}.pth'
+            ckpt_root, f'best_valid_joint_seed{seed}{checkpoint_suffix}.pth'
         )
         epochs_without_improvement = 0
         early_stopping_patience = args['base'].get('early_stopping_patience', 25)

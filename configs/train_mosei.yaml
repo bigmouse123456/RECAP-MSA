@@ -21,6 +21,7 @@ base:
   finetune_generator: true
   head_dropout: 0.2
   fusion_dropout: 0.2
+  checkpoint_tag: continuous_v3
   early_stopping_patience: 25
   selection_corr_weight: 0.5
   selection_mae_weight: 0.5
