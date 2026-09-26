@@ -133,10 +133,12 @@ Attachment 2 `unaligned_50.pkl`) that targets the train/validation gap:
   modality gate, and regression + polarity heads with unimodal auxiliary heads.
 - **Validation matches both special tests.** Every epoch is scored on the
   complete valid split (Attachment 4) and on a fixed seeded contiguous-missing
-  copy (Attachment 3); selection uses the mean of Macro-F1 + Corr - MAE.
+  copy (Attachment 3). The classification-first selection objective is the
+  view average of `0.6 * Macro-F1 + 0.4 * Accuracy`.
 - **Polarity decision on validation.** After training, class log-biases or
-  intensity thresholds are chosen by validation Macro-F1 and stored in the
-  checkpoint.  The test split is evaluated once, afterwards.
+  intensity thresholds are chosen by the same validation-only objective and
+  stored in the checkpoint. The test split is evaluated once, after the final
+  loss-weight configuration has been selected.
 
 ```bash
 # train a few seeds (config: configs/robust_mosei.yaml)
@@ -151,6 +153,30 @@ python predict_robust.py --checkpoints "ckpt/robust_mosei/robust_robust_v1_seed*
   --decision_json outputs/ensemble_decision.json \
   --input_dir <attachment3_dir> --output_csv outputs/attachment3_predictions.csv
 ```
+
+### Loss-weight tuning and sensitivity
+
+`run_loss_tuning.py` compares the baseline with the recommended A/B/C joint
+settings and reproduces the one-factor sensitivity curves for classification,
+unimodal auxiliary and Pearson loss weights. Tuning uses only the Attachment 2
+validation split. A candidate remains eligible when its mean MAE is at most
+0.01 above baseline and its mean Pearson correlation is at most 0.01 below
+baseline.
+
+```bash
+# 16 unique configurations x 3 seeds; finished runs are skipped on restart
+python run_loss_tuning.py --gpus 0 1 --jobs_per_gpu 1
+
+# list commands without starting training
+python run_loss_tuning.py --dry_run
+
+# rebuild summaries and the sensitivity figure from completed runs
+python run_loss_tuning.py --summarize_only
+```
+
+The script writes `loss_combination_summary.csv`, `loss_recommendation.json`,
+`loss_sensitivity_summary.csv` and `loss_weight_sensitivity_valid.png` under
+`outputs/loss_tuning/`.
 
 The prediction CSV contains polarity, intensity, class probabilities, the main
 modality, per-modality contribution weights, unimodal intensities, observed

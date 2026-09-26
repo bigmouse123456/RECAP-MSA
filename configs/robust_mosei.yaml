@@ -51,6 +51,12 @@ optim:
   early_stopping_patience: 12
 
 selection:
-  # score = mean over views of (Macro-F1 + Corr - MAE); the missing view
-  # matches Attachment 3, the complete view matches Attachment 4.
+  # Model selection is classification-first: average the complete/missing
+  # validation views, then maximize 0.6 Macro-F1 + 0.4 Accuracy.
+  # Regression safeguards (MAE <= baseline + 0.01 and Corr >= baseline - 0.01)
+  # are applied across candidate configurations by run_loss_tuning.py.
   views: {complete: 0.5, missing: 0.5}
+  metrics: {Polarity_Macro_F1: 0.6, Polarity_Accuracy: 0.4}
+  # The post-training logit-bias / intensity-threshold search uses the same
+  # validation-only objective. Attachment 3/4 are never used for tuning.
+  decision: {f1_weight: 0.6, accuracy_weight: 0.4}

@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
                         help='override a config entry (dotted key, YAML value); repeatable')
     parser.add_argument('--result_json', default='')
+    parser.add_argument('--skip_test', action='store_true',
+                        help='do not evaluate test (recommended for hyper-parameter search)')
     return parser.parse_args()
 
 
@@ -149,7 +151,11 @@ def evaluate_views(model, loaders, split, device, decision=DEFAULT_DECISION):
 
 def weighted_score(metrics, cfg):
     views = cfg['selection']['views']
-    return sum(weight * selection_score(metrics[view]) for view, weight in views.items())
+    metric_weights = cfg['selection'].get('metrics')
+    return sum(
+        weight * selection_score(metrics[view], metric_weights)
+        for view, weight in views.items()
+    )
 
 
 def main():
@@ -224,27 +230,38 @@ def main():
     # Polarity decision rule: chosen on validation (both views) only.
     valid_outputs, _ = evaluate_views(model, loaders, 'valid', device)
     merged = merge_outputs(list(valid_outputs.values()))
-    decision, valid_f1 = calibrate_decision(merged['probs'], merged['intensity'], merged['classes'])
+    decision_cfg = cfg['selection'].get('decision', {})
+    decision, valid_polarity_score = calibrate_decision(
+        merged['probs'], merged['intensity'], merged['classes'],
+        f1_weight=decision_cfg.get('f1_weight', 1.0),
+        accuracy_weight=decision_cfg.get('accuracy_weight', 0.0),
+    )
     checkpoint['decision'] = decision
     checkpoint['valid_metrics'] = {
         view: compute_metrics(output, decision) for view, output in valid_outputs.items()
     }
     torch.save(checkpoint, ckpt_path)
-    print(f'Best epoch {best_epoch}; calibrated polarity rule {decision} (valid Macro-F1 {valid_f1:.4f})')
+    print(f'Best epoch {best_epoch}; calibrated polarity rule {decision} '
+          f'(valid polarity objective {valid_polarity_score:.4f})')
     print(f'Valid (calibrated): {json.dumps(checkpoint["valid_metrics"])}')
 
-    test_outputs, test_metrics = evaluate_views(model, loaders, 'test', device, decision)
-    print(f'Test complete: {test_metrics["complete"]}')
-    print(f'Test missing:  {test_metrics["missing"]}')
+    test_outputs, test_metrics = {}, {}
+    if not args.skip_test:
+        test_outputs, test_metrics = evaluate_views(model, loaders, 'test', device, decision)
+        print(f'Test complete: {test_metrics["complete"]}')
+        print(f'Test missing:  {test_metrics["missing"]}')
 
     if args.result_json:
         result = {
             'seed': seed, 'best_epoch': best_epoch, 'overrides': args.set,
             'checkpoint': ckpt_path, 'decision': decision,
             'valid': checkpoint['valid_metrics'], 'test': test_metrics,
+            'valid_selection_score': weighted_score(checkpoint['valid_metrics'], cfg),
+            'valid_polarity_objective': valid_polarity_score,
             # Same models with plain classifier argmax (no validation calibration).
             'valid_argmax': {v: compute_metrics(o, DEFAULT_DECISION) for v, o in valid_outputs.items()},
-            'test_argmax': {v: compute_metrics(o, DEFAULT_DECISION) for v, o in test_outputs.items()},
+            'test_argmax': ({v: compute_metrics(o, DEFAULT_DECISION)
+                             for v, o in test_outputs.items()} if test_outputs else {}),
         }
         os.makedirs(os.path.dirname(os.path.abspath(args.result_json)), exist_ok=True)
         with open(args.result_json, 'w', encoding='utf-8') as handle:
