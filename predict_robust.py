@@ -120,6 +120,19 @@ def text_tokens(record, index, tokenizer, length):
     return tokenizer.convert_ids_to_tokens([int(value) for value in ids])
 
 
+def missing_spans(observed, real):
+    """Contiguous missing runs (inclusive frame indices) inside the valid length."""
+    missing = real & ~observed
+    spans, start = [], None
+    for position, value in enumerate(list(missing) + [False]):
+        if value and start is None:
+            start = position
+        elif not value and start is not None:
+            spans.append((start, position - 1))
+            start = None
+    return spans
+
+
 def describe_evidence(weights, stride, length, top_k, tokens=None):
     order = np.argsort(-weights)[:top_k]
     items = []
@@ -208,7 +221,14 @@ def main():
                 tokens = text_tokens(record, index, tokenizer, lengths['text']) if modality == 'text' else None
                 row[f'{modality}_weight'] = round(float(weights[i]), 4)
                 row[f'{modality}_intensity'] = round(float(unimodal[i]), 4)
-                row[f'{modality}_observed_ratio'] = round(float(reliability[i]), 4)
+                # Frame-level missing statistics (the gate sees 5-frame windows).
+                real = sample[f'{modality}_real'].numpy()
+                observed = sample[f'{modality}_observed'].numpy()
+                spans = missing_spans(observed, real)
+                row[f'{modality}_observed_ratio'] = round(float(observed.sum() / max(real.sum(), 1)), 4)
+                row[f'{modality}_missing_frames'] = int((real & ~observed).sum())
+                row[f'{modality}_missing_spans'] = ';'.join(f'{a}-{b}' for a, b in spans)
+                row[f'{modality}_gate_reliability'] = round(float(reliability[i]), 4)
                 row[f'{modality}_length'] = lengths[modality]
                 row[f'{modality}_evidence'] = describe_evidence(
                     temporal, stride, lengths[modality], args.top_k, tokens
