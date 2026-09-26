@@ -182,6 +182,7 @@ def metric_row(name, metrics):
             f'{metrics["Polarity_Accuracy"]:.4f} | {metrics["Polarity_Macro_F1"]:.4f} |')
 
 
+FENCE = chr(96) * 3  # markdown code fence, built so this file has no literal fence
 VIEW_NAMES = {'complete': '完整', 'missing': '缺失'}
 SPLIT_NAMES = {'valid': '验证集', 'test': '测试集'}
 
@@ -232,7 +233,7 @@ def readme_text(cfg, versions, checkpoints, faithfulness, ensemble):
 
 ## 1. 目录结构
 
-```
+{FENCE}
 代码与模型/
 ├── README.md                     本说明
 ├── requirements.txt              运行环境
@@ -249,7 +250,7 @@ def readme_text(cfg, versions, checkpoints, faithfulness, ensemble):
     ├── robust_robust_v1_seed2222.pth
     ├── robust_robust_v1_seed3333.pth
     └── ensemble_decision.json          验证集上确定的集成极性决策规则
-```
+{FENCE}
 
 ## 2. 运行环境
 
@@ -322,7 +323,7 @@ def readme_text(cfg, versions, checkpoints, faithfulness, ensemble):
 
 ### 6.1 用提供的模型直接复现提交结果
 
-```bash
+{FENCE}bash
 # 问题2：附件3预测
 python predict_robust.py --checkpoints "checkpoints/robust_robust_v1_seed*.pth" \\
   --decision_json checkpoints/ensemble_decision.json --bert_path bert-base-uncased \\
@@ -332,19 +333,19 @@ python predict_robust.py --checkpoints "checkpoints/robust_robust_v1_seed*.pth" 
 python explain_robust.py --checkpoints "checkpoints/robust_robust_v1_seed*.pth" \\
   --decision_json checkpoints/ensemble_decision.json --bert_path bert-base-uncased \\
   --input_dir <附件4目录>/未对齐版本 --output_csv outputs/附件4_预测与解释结果.csv
-```
+{FENCE}
 
 输出与 `结果文件/` 中的两个 CSV 一致（打包时已在本目录下重新运行并逐行核对）。
 
 ### 6.2 从头训练并复现分析
 
-```bash
+{FENCE}bash
 for s in 1111 2222 3333; do python train_robust.py --config_file configs/robust_mosei.yaml --seed $s; done
 python analyze_robust.py --checkpoints "checkpoints_retrained/robust_robust_v1_seed*.pth"
 python explain_robust.py --checkpoints "checkpoints_retrained/robust_robust_v1_seed*.pth" \\
   --decision_json outputs/ensemble_decision.json --bert_path bert-base-uncased \\
   --faithfulness_samples 500
-```
+{FENCE}
 
 - 新模型保存在 `checkpoints_retrained/`，不会覆盖提供的模型。
 - `analyze_robust.py` 输出集成指标、`outputs/ensemble_decision.json`（集成极性规则）和
