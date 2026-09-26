@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import random
 
 import numpy as np
 import torch
@@ -21,8 +22,15 @@ from core.robust_eval import (
     DEFAULT_DECISION, calibrate_decision, collect, compute_metrics,
     merge_outputs, selection_score, to_device,
 )
-from core.utils import setup_seed
 from models.robust_msa import RobustMSA, RobustMSALoss
+
+
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
 
 
 def parse_args():

@@ -83,19 +83,22 @@ class ModalityEncoder(nn.Module):
 
 
 class TextBertFrontend(nn.Module):
+    """Optional (text_source: bert): fine-tune the top BERT layers from text_bert."""
+
     def __init__(self, cfg):
         super().__init__()
-        from models.bert import BertTextEncoder
-        self.bert = BertTextEncoder(use_finetune=True, pretrained=cfg['bert_pretrained'])
+        from transformers import BertModel
+        self.model = BertModel.from_pretrained(cfg['bert_pretrained'])
         frozen = cfg.get('bert_frozen_layers', 8)
-        for parameter in self.bert.model.embeddings.parameters():
+        for parameter in self.model.embeddings.parameters():
             parameter.requires_grad = False
-        for layer in self.bert.model.encoder.layer[:frozen]:
+        for layer in self.model.encoder.layer[:frozen]:
             for parameter in layer.parameters():
                 parameter.requires_grad = False
 
     def forward(self, text_bert):
-        return self.bert(text_bert.float())
+        ids, mask, segments = text_bert[:, 0].long(), text_bert[:, 1].float(), text_bert[:, 2].long()
+        return self.model(input_ids=ids, attention_mask=mask, token_type_ids=segments)[0]
 
 
 class RobustMSA(nn.Module):

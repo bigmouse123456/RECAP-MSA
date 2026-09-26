@@ -18,10 +18,31 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from core.dataset import MMDataset
 
 MODALITIES = ('text', 'audio', 'vision')
 UNK_TOKEN_ID = 100
+
+
+def normalize_classification_labels(labels, regression):
+    """Map Negative/Neutral/Positive (strings, -1/0/1 or 0/1/2) to 0/1/2 and
+    check that every label agrees with the sign of the regression label."""
+    labels = np.asarray(labels).reshape(-1)
+    regression = np.asarray(regression).reshape(-1)
+    if labels.dtype.kind in {'U', 'S', 'O'}:
+        mapping = {'negative': 0, 'neutral': 1, 'positive': 2}
+        normalized = np.asarray([mapping[str(v).strip().lower()] for v in labels], dtype=np.int64)
+    else:
+        normalized = labels.astype(np.int64)
+        values = set(np.unique(normalized).tolist())
+        if values.issubset({-1, 0, 1}):
+            normalized = normalized + 1
+        elif not values.issubset({0, 1, 2}):
+            raise ValueError(f'Unexpected classification labels {sorted(values)}')
+    expected = np.where(regression < 0, 0, np.where(regression > 0, 2, 1))
+    mismatch = int(np.count_nonzero(normalized != expected))
+    if mismatch:
+        raise ValueError(f'{mismatch} classification labels disagree with regression_labels')
+    return normalized
 
 
 def clean_features(features):
@@ -82,9 +103,9 @@ def load_split(split, text_source):
     if 'regression_labels' in split:
         regression = np.asarray(split['regression_labels'], dtype=np.float32).reshape(-1)
         if 'classification_labels' in split:
-            classes = MMDataset._normalize_classification_labels(
+            classes = normalize_classification_labels(
                 split['classification_labels'], regression
-            ).reshape(-1)
+            )
         else:
             classes = np.where(regression < 0, 0, np.where(regression > 0, 2, 1))
         record['regression'] = regression
