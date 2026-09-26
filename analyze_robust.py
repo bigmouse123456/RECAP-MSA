@@ -94,11 +94,17 @@ def main():
             views[(split, view)] = ensemble_collect(models, dataset, cfg, device)
 
     merged = merge_outputs([views[('valid', 'complete')], views[('valid', 'missing')]])
-    decision, valid_f1 = calibrate_decision(merged['probs'], merged['intensity'], merged['classes'])
+    decision_cfg = cfg.get('selection', {}).get('decision', {})
+    decision, valid_polarity_score = calibrate_decision(
+        merged['probs'], merged['intensity'], merged['classes'],
+        f1_weight=decision_cfg.get('f1_weight', 1.0),
+        accuracy_weight=decision_cfg.get('accuracy_weight', 0.0),
+    )
     Path(args.decision_json).parent.mkdir(parents=True, exist_ok=True)
     with open(args.decision_json, 'w', encoding='utf-8') as handle:
         json.dump(decision, handle)
-    print(f'Ensemble polarity rule {decision} (valid Macro-F1 {valid_f1:.4f}) -> {args.decision_json}')
+    print(f'Ensemble polarity rule {decision} '
+          f'(valid polarity objective {valid_polarity_score:.4f}) -> {args.decision_json}')
     summary = {'decision': decision, 'checkpoints': len(models)}
     for (split, view), outputs in views.items():
         metrics = compute_metrics(outputs, decision)
