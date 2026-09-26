@@ -57,6 +57,25 @@ def read_pickle(path):
         return CompatUnpickler(handle).load()
 
 
+def normalize_fields(split, name):
+    """Add a missing sample axis; rebuild text_bert from raw_text if malformed."""
+    split = dict(split)
+    shapes = {key: getattr(np.asarray(value), 'shape', None) for key, value in split.items()}
+    for key in ('audio', 'vision', 'text'):
+        if key in split and np.asarray(split[key]).ndim == 2:
+            split[key] = np.asarray(split[key])[None]
+    if 'text_bert' in split:
+        value = np.asarray(split['text_bert'])
+        if value.ndim == 2 and value.shape[0] == 3:
+            value = value[None]
+        if value.ndim == 3 and value.shape[1] == 3:
+            split['text_bert'] = value
+        else:
+            print(f'NOTE: {name} text_bert shape {value.shape} unsupported; rebuilt from raw_text')
+            split.pop('text_bert')
+    return split, shapes
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoints', nargs='+', required=True)
@@ -248,6 +267,9 @@ def explain_directory(args, models, cfg, normalizer, decision, tokenizer, encode
     for path in files:
         payload = read_pickle(path)
         split = payload[args.split] if args.split in payload else payload
+        split, shapes = normalize_fields(split, path.name)
+        if path == files[0]:
+            print(f'Field shapes in {path.name}: {shapes}')
         split = complete_text_fields(split, text_source, encoder)
         record = load_split(split, text_source)
         for index in range(record['count']):
