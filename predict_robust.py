@@ -32,6 +32,8 @@ def parse_args():
     parser.add_argument('--text_layer', type=int, default=-1,
                         help='BERT hidden layer that reproduces Attachment 2 text '
                              '(see check_text_features.py)')
+    parser.add_argument('--bert_path', default='',
+                        help='local bert-base-uncased directory (overrides the checkpoint config)')
     parser.add_argument('--top_k', type=int, default=3)
     parser.add_argument('--device', default='cuda')
     return parser.parse_args()
@@ -137,6 +139,8 @@ def main():
     models = load_models(args.checkpoints, device)
     cfg = models[0][2]['config']
     text_source = cfg['data']['text_source']
+    if args.bert_path:
+        cfg['model']['bert_pretrained'] = args.bert_path
     tokenizer = load_tokenizer(cfg)
     decision = models[0][2]['decision']
     if args.decision_json:
