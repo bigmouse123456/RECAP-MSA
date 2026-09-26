@@ -550,7 +550,7 @@ def main():
             print('\n'.join(problems[:20]))
             raise SystemExit('re-run from the package does NOT match the submitted CSVs')
         print('  re-run from the package matches both submitted CSVs')
-    for path in code.rglob('__pycache__'):
+    for path in list(code.rglob('__pycache__')):
         shutil.rmtree(path)
 
     print('[6/6] identity scan and zip')
