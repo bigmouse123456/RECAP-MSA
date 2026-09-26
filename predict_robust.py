@@ -18,6 +18,7 @@ import torch
 
 from core.robust_data import FeatureNormalizer, MODALITIES, build_sample, load_split
 from core.robust_eval import POLARITY_NAMES, decide
+from core.robust_explain import explain_ensemble
 from models.robust_msa import RobustMSA
 
 
@@ -30,6 +31,8 @@ def parse_args():
     parser.add_argument('--decision_json', default='',
                         help='ensemble polarity rule written by analyze_robust.py')
     parser.add_argument('--top_k', type=int, default=3)
+    parser.add_argument('--no_occlusion', action='store_true',
+                        help='skip slower direct modality and window removal checks')
     parser.add_argument('--device', default='cuda')
     return parser.parse_args()
 
@@ -112,11 +115,14 @@ def main():
             raw = {key: value[index] for key, value in record['arrays'].items()}
             lengths = {key: int(value[index]) for key, value in record['lengths'].items()}
             outputs = []
+            runs = []
             for model, normalizer, _ in models:
                 sample = build_sample(raw, lengths, normalizer, text_source)
                 batch = {key: value.unsqueeze(0).to(device) for key, value in sample.items()}
                 with torch.no_grad():
-                    outputs.append(model(batch))
+                    result = model(batch)
+                outputs.append(result)
+                runs.append((model, batch, result))
 
             def mean(key):
                 return torch.stack([out[key][0] for out in outputs]).mean(0).cpu().numpy()
@@ -152,6 +158,22 @@ def main():
                 row[f'{modality}_length'] = lengths[modality]
                 row[f'{modality}_evidence'] = describe_evidence(
                     temporal, stride, lengths[modality], args.top_k, tokens
+                )
+            if not args.no_occlusion:
+                explanation = explain_ensemble(runs, args.top_k)
+                for modality in MODALITIES:
+                    row[f'{modality}_removal_delta'] = round(
+                        explanation[f'{modality}_removal_delta'], 5
+                    )
+                    windows = explanation[f'{modality}_windows']
+                    row[f'{modality}_occlusion_evidence'] = '; '.join(
+                        f'{start}-{end-1}:attention={attention:.4f},'
+                        f'prediction_delta={delta:+.4f}'
+                        for start, end, attention, delta in windows
+                    )
+                row['main_modality'] = max(
+                    MODALITIES,
+                    key=lambda modality: abs(explanation[f'{modality}_removal_delta']),
                 )
             rows.append(row)
             print(f'{sample_id}: {row["polarity_pred"]} {intensity:+.3f} main={row["main_modality"]}')

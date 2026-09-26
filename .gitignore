@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.venv/
+outputs/
 
 # Server-only experiment artifacts.
 data/
