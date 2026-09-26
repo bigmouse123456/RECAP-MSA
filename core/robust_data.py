@@ -233,24 +233,29 @@ class RobustMSADataset(Dataset):
         self.normalizer = normalizer
         self.text_source = cfg['text_source']
         self.aug = cfg['augment']
+        # The fixed "missing" evaluation view must not change when an ablation
+        # alters the training augmentation, so it has its own settings.
+        self.eval_aug = cfg.get('eval_missing', cfg['augment'])
         self.mode = mode
         self.fixed_spans = fixed_spans
         if mode == 'missing' and fixed_spans is None:
             rng = np.random.default_rng(seed)
-            self.fixed_spans = [self._random_spans(rng, index) for index in range(record['count'])]
+            self.fixed_spans = [self._random_spans(rng, index, self.eval_aug)
+                                for index in range(record['count'])]
 
     def _length(self, modality, index):
         return int(self.record['lengths'][modality][index])
 
-    def _random_spans(self, rng, index):
+    def _random_spans(self, rng, index, aug=None):
+        aug = aug or self.aug
         spans = {}
         for modality in MODALITIES:
-            if rng.random() < self.aug['span_prob']:
+            if rng.random() < aug['span_prob']:
                 spans[modality] = sample_spans(
                     rng, self._length(modality, index),
-                    self.aug['min_ratio'], self.aug['max_ratio'], self.aug['max_spans'],
+                    aug['min_ratio'], aug['max_ratio'], aug['max_spans'],
                 )
-        if rng.random() < self.aug['modality_drop_prob']:
+        if rng.random() < aug['modality_drop_prob']:
             # Drop one whole modality, never all three.
             modality = MODALITIES[int(rng.integers(0, 3))]
             spans[modality] = [(0, self._length(modality, index))]

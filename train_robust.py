@@ -3,9 +3,12 @@
     python train_robust.py --config_file configs/robust_mosei.yaml --seed 1111
 
 The test split is evaluated once, after model selection and polarity-rule
-calibration on the validation split.
+calibration on the validation split.  --set overrides config entries, e.g.
+--set loss.cls=0.25 --set data.augment.span_prob=0 (used by run_ablation.py);
+--result_json writes the final valid/test metrics.
 """
 import argparse
+import copy
 import json
 import math
 import os
@@ -38,7 +41,25 @@ def parse_args():
     parser.add_argument('--config_file', default='configs/robust_mosei.yaml')
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
+                        help='override a config entry (dotted key, YAML value); repeatable')
+    parser.add_argument('--result_json', default='')
     return parser.parse_args()
+
+
+def apply_overrides(cfg, assignments):
+    for assignment in assignments:
+        key, _, value = assignment.partition('=')
+        if not _:
+            raise ValueError(f'--set expects KEY=VALUE, got {assignment!r}')
+        node, parts = cfg, key.split('.')
+        for part in parts[:-1]:
+            if part not in node:
+                raise KeyError(f'unknown config key {key!r}')
+            node = node[part]
+        node[parts[-1]] = yaml.safe_load(value)
+        print(f'override {key} = {node[parts[-1]]!r}')
+    return cfg
 
 
 def build_loaders(cfg, records, normalizer):
@@ -135,6 +156,10 @@ def main():
     args = parse_args()
     with open(args.config_file, encoding='utf-8') as handle:
         cfg = yaml.safe_load(handle)
+    # Freeze the evaluation "missing" view before any --set changes the
+    # training augmentation (identical to augment for the main model).
+    cfg['data'].setdefault('eval_missing', copy.deepcopy(cfg['data']['augment']))
+    cfg = apply_overrides(cfg, args.set)
     seed = cfg['seed'] if args.seed is None else args.seed
     setup_seed(seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -145,6 +170,8 @@ def main():
     for split, record in records.items():
         print(f'{split}: {record["count"]} samples')
     modalities = ['audio', 'vision'] + (['text'] if text_source == 'precomputed' else [])
+    if not cfg['data'].get('normalize', True):
+        modalities = []  # ablation: raw feature scales
     normalizer = FeatureNormalizer().fit(records['train'], modalities)
     loaders = build_loaders(cfg, records, normalizer)
 
@@ -206,9 +233,23 @@ def main():
     print(f'Best epoch {best_epoch}; calibrated polarity rule {decision} (valid Macro-F1 {valid_f1:.4f})')
     print(f'Valid (calibrated): {json.dumps(checkpoint["valid_metrics"])}')
 
-    _, test_metrics = evaluate_views(model, loaders, 'test', device, decision)
+    test_outputs, test_metrics = evaluate_views(model, loaders, 'test', device, decision)
     print(f'Test complete: {test_metrics["complete"]}')
     print(f'Test missing:  {test_metrics["missing"]}')
+
+    if args.result_json:
+        result = {
+            'seed': seed, 'best_epoch': best_epoch, 'overrides': args.set,
+            'checkpoint': ckpt_path, 'decision': decision,
+            'valid': checkpoint['valid_metrics'], 'test': test_metrics,
+            # Same models with plain classifier argmax (no validation calibration).
+            'valid_argmax': {v: compute_metrics(o, DEFAULT_DECISION) for v, o in valid_outputs.items()},
+            'test_argmax': {v: compute_metrics(o, DEFAULT_DECISION) for v, o in test_outputs.items()},
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(args.result_json)), exist_ok=True)
+        with open(args.result_json, 'w', encoding='utf-8') as handle:
+            json.dump(result, handle, indent=2)
+        print(f'Wrote {args.result_json}')
 
 
 if __name__ == '__main__':

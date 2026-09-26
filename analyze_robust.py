@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument('--output_csv', default='outputs/missing_analysis.csv')
     parser.add_argument('--decision_json', default='outputs/ensemble_decision.json')
     parser.add_argument('--skip_patterns', action='store_true')
+    parser.add_argument('--metrics_json', default='', help='write ensemble valid/test metrics')
     parser.add_argument('--device', default='cuda')
     return parser.parse_args()
 
@@ -98,8 +99,15 @@ def main():
     with open(args.decision_json, 'w', encoding='utf-8') as handle:
         json.dump(decision, handle)
     print(f'Ensemble polarity rule {decision} (valid Macro-F1 {valid_f1:.4f}) -> {args.decision_json}')
+    summary = {'decision': decision, 'checkpoints': len(models)}
     for (split, view), outputs in views.items():
-        print(f'{split:5s} {view:8s} {compute_metrics(outputs, decision)}')
+        metrics = compute_metrics(outputs, decision)
+        summary.setdefault(split, {})[view] = metrics
+        print(f'{split:5s} {view:8s} {metrics}')
+    if args.metrics_json:
+        Path(args.metrics_json).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.metrics_json, 'w', encoding='utf-8') as handle:
+            json.dump(summary, handle, indent=2)
 
     if args.skip_patterns:
         return

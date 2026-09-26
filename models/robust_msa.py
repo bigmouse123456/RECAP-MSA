@@ -108,6 +108,13 @@ class RobustMSA(nn.Module):
         self.text_source = cfg['data']['text_source']
         dim = model_cfg['hidden_dim']
         self.text_frontend = TextBertFrontend(model_cfg) if self.text_source == 'bert' else None
+        # Ablation switches (defaults = full model; no extra parameters, so old
+        # checkpoints load unchanged).  fusion: 'gate' | 'mean'.  missing_mask:
+        # False treats zeroed rows as ordinary observed input.
+        self.fusion_mode = model_cfg.get('fusion', 'gate')
+        self.use_missing_mask = model_cfg.get('missing_mask', True)
+        if self.fusion_mode not in ('gate', 'mean'):
+            raise ValueError(f"model.fusion must be 'gate' or 'mean', got {self.fusion_mode!r}")
 
         self.strides = {m: model_cfg['downsample'].get(m, 1) for m in MODALITIES}
         self.encoders = nn.ModuleDict()
@@ -136,7 +143,7 @@ class RobustMSA(nn.Module):
         pooled, temporal, reliability, available = [], {}, [], []
         for modality in MODALITIES:
             real = batch[f'{modality}_real']
-            observed = batch[f'{modality}_observed']
+            observed = batch[f'{modality}_observed'] if self.use_missing_mask else real
             if modality == 'text' and self.text_frontend is not None:
                 x = self.text_frontend(batch['text_bert'])
             else:
@@ -160,6 +167,8 @@ class RobustMSA(nn.Module):
             [pooled, reliability.unsqueeze(-1), available.float().unsqueeze(-1)], dim=-1
         )
         gate_scores = self.gate(gate_input).squeeze(-1)
+        if self.fusion_mode == 'mean':
+            gate_scores = torch.zeros_like(gate_scores)  # uniform over available modalities
         # If all three modalities are absent fall back to a uniform average.
         gate_mask = available | ~available.any(dim=1, keepdim=True)
         modality_weights = masked_softmax(gate_scores, gate_mask)
