@@ -29,6 +29,9 @@ def parse_args():
     parser.add_argument('--split', default='test', help='top-level key inside each PKL')
     parser.add_argument('--decision_json', default='',
                         help='ensemble polarity rule written by analyze_robust.py')
+    parser.add_argument('--text_layer', type=int, default=-1,
+                        help='BERT hidden layer that reproduces Attachment 2 text '
+                             '(see check_text_features.py)')
     parser.add_argument('--top_k', type=int, default=3)
     parser.add_argument('--device', default='cuda')
     return parser.parse_args()
@@ -55,6 +58,54 @@ def load_tokenizer(cfg):
     except Exception as error:  # evidence then falls back to token positions
         print(f'WARNING: tokenizer unavailable ({error}); text evidence uses positions only')
         return None
+
+
+class RawTextEncoder:
+    """Rebuild text_bert / 50x768 text features from raw_text.
+
+    Attachments 3/4 only provide raw_text.  check_text_features.py verifies on
+    Attachment 2 that this reproduces the stored fields (tokens and layer).
+    """
+
+    def __init__(self, cfg, tokenizer, layer, device):
+        from transformers import BertModel
+        self.tokenizer = tokenizer
+        self.max_len = cfg['model']['max_len']['text']
+        self.layer = layer
+        self.device = device
+        self.model = BertModel.from_pretrained(
+            cfg['model']['bert_pretrained'], output_hidden_states=True
+        ).to(device).eval()
+
+    def __call__(self, raw_texts):
+        encoded = self.tokenizer(
+            [str(text) for text in raw_texts], max_length=self.max_len,
+            padding='max_length', truncation=True, return_token_type_ids=True,
+        )
+        text_bert = np.stack([encoded['input_ids'], encoded['attention_mask'],
+                              encoded['token_type_ids']], axis=1).astype(np.int64)
+        with torch.no_grad():
+            tensors = [torch.from_numpy(text_bert[:, i]).to(self.device) for i in range(3)]
+            hidden = self.model(input_ids=tensors[0], attention_mask=tensors[1],
+                                token_type_ids=tensors[2]).hidden_states[self.layer]
+        return text_bert, hidden.cpu().numpy().astype(np.float32)
+
+
+def complete_text_fields(split, text_source, encoder):
+    """Add text_bert / text built from raw_text when the file lacks them."""
+    need_features = text_source == 'precomputed' and 'text' not in split
+    need_tokens = 'text_bert' not in split
+    if not (need_features or need_tokens):
+        return split
+    if encoder is None:
+        raise ValueError('File lacks text features; transformers/BERT is required to '
+                         'rebuild them from raw_text')
+    split = dict(split)
+    text_bert, features = encoder(np.asarray(split['raw_text']).reshape(-1))
+    split.setdefault('text_bert', text_bert)
+    if need_features:
+        split['text'] = features
+    return split
 
 
 def text_tokens(record, index, tokenizer, length):
@@ -95,6 +146,7 @@ def main():
         print('WARNING: ensemble uses the first checkpoint\'s polarity rule; '
               'run analyze_robust.py and pass --decision_json')
     print(f'Polarity rule: {decision}')
+    encoder = RawTextEncoder(cfg, tokenizer, args.text_layer, device) if tokenizer else None
 
     files = sorted(Path(args.input_dir).glob('*.pkl'))
     if not files:
@@ -105,6 +157,10 @@ def main():
         with open(path, 'rb') as handle:
             payload = pickle.load(handle)
         split = payload[args.split] if args.split in payload else payload
+        if 'text' not in split and text_source == 'precomputed':
+            print(f'NOTE: {path.name} has no text features; rebuilt from raw_text '
+                  f'(BERT hidden layer {args.text_layer})')
+        split = complete_text_fields(split, text_source, encoder)
         record = load_split(split, text_source)
         if 'audio_lengths' not in split or 'vision_lengths' not in split:
             print(f'NOTE: {path.name} has no explicit lengths; inferred from last non-zero row')
